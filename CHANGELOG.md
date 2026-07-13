@@ -1,5 +1,6 @@
---!strict
--- CHANGELOG.md (shared-datamodules PR entry)
+# Changelog
+
+All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 - Add Shared DataModules and type definitions: Config, Items, Skills, Classes, NPCs, Quests, Zones, EnhancementTable, DurabilityProfiles, Achievements, SeasonalEvents, BalancingData

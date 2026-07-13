@@ -29,4 +29,7 @@ export type PlayerProfileRef = {
     CharacterName: string,
 }
 
-return nil
+-- Export an empty table with types. Keep immutable for safety.
+local Exports = {}
+
+return table.freeze(Exports)

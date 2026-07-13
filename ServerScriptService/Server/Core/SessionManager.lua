@@ -1,8 +1,8 @@
 --!strict
 -- ServerScriptService/Server/Core/SessionManager.lua
--- __doc: Session lifecycle and locking placeholders; designed for future cross-server locking.
+-- __doc: SessionManager with local locks and session records. Designed for easy swap to distributed locks.
 -- Ownership: Core
--- Consumers: PlayerLoader, DataService, other services
+-- Consumers: PlayerLoader, InventoryService, TradeService
 
 export type Session = {
     UserId: number,
@@ -14,36 +14,42 @@ local SessionManager = {}
 SessionManager.__doc = [[
 Service: SessionManager
 API:
-  Init(deps: { dataService: any, auditService: any, eventBus: any }) -> nil
+  Init(deps: { dataService: any?, logger: any? }) -> nil
   Start() -> nil
   LockSession(userId: number) -> boolean
   UnlockSession(userId: number) -> nil
   GetActiveSession(userId: number) -> Session?
-Notes: Placeholder local locks; design allows swapping to distributed locks.
-TODO:
-  - Implement distributed locking (Redis/Etcd) and session heartbeat.
+Notes:
+  - This is a single-process lock for now. Replace with distributed lock (Redis/Etcd) for cross-server.
 ]]
 
-local sessions: { [number]: Session } = {}
-local locks: { [number]: boolean } = {}
+local dataService: any = nil
+local logger: any = nil
 
-function SessionManager.Init(_deps: { dataService: any, auditService: any, eventBus: any })
-    -- TODO: wire dependencies
+local sessions: { [number]: Session } = {}
+local locks: { [number]: number } = {} -- store lock owner timestamp
+
+function SessionManager.Init(deps: { dataService: any?, logger: any? })
+    dataService = deps and deps.dataService or nil
+    logger = deps and deps.logger or nil
 end
 
 function SessionManager.Start() end
 
+-- Attempt to acquire a lock; return true on success
 function SessionManager.LockSession(userId: number)
+    if type(userId) ~= "number" then return false end
     if locks[userId] then
         return false
     end
-    locks[userId] = true
+    locks[userId] = os.time()
     sessions[userId] = { UserId = userId, StartedAt = os.time(), LastActiveAt = os.time() }
     return true
 end
 
 function SessionManager.UnlockSession(userId: number)
-    locks[userId] = false
+    locks[userId] = nil
+    sessions[userId] = nil
 end
 
 function SessionManager.GetActiveSession(userId: number)

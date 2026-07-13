@@ -1,51 +1,121 @@
 --!strict
 -- ServerScriptService/Server/Economy/InventoryService.lua
--- __doc: InventoryService manages a player's inventory and equipment. Infrastructure-only skeleton.
+-- __doc: InventoryService (infrastructure-only). Manages reads/writes through InventoryRepository and emits events on changes.
 -- Ownership: Economy
 -- Consumers: PlayerLoader, TradeService, UI, DataService
 
-export type ItemInstance = { [string]: unknown }
+local InventoryRepository = require(script.Parent.InventoryRepository)
+local InventoryConfig = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("DataModules"):WaitForChild("InventoryConfig"))
+
+export type ItemInstance = {
+    ItemId: string,
+    InstanceId: string,
+    StackCount: number,
+    Rarity: string?,
+    EnhancementLevel: number?,
+    CurrentDurability: number?,
+    MaxDurability: number?,
+    Extensions: { [string]: unknown }?,
+}
 
 local InventoryService = {}
 InventoryService.__doc = [[
-Service: InventoryService
 API:
-  Init(deps: { eventBus: any, dataService: any, auditService: any }) -> nil
+  Init(deps: { eventBus: any, repository: any, auditService: any, dataService: any }) -> nil
   Start() -> nil
-  GetInventory(userId: number) -> { ItemInstance }?
-  AddItem(userId: number, itemId: string, count: number) -> boolean
+  GetInventory(userId: number) -> (Inventory? inventory)
+  AddItem(userId: number, itemId: string, count: number) -> (boolean ok, string? instanceId)
   RemoveItem(userId: number, instanceId: string, count: number) -> boolean
-Notes: This is an infrastructure skeleton. Real inventory logic, validation, and persistence live in implementation.
-TODO:
-  - Integrate with DataService save/load, audit hooks, stack merging, and concurrency handling.
+Notes:
+  - All modifications must call auditService.Log and publish EventBus events. Validation is done by remote middleware or calling services.
 ]]
 
-local eventBus: any
-local dataService: any
-local auditService: any
+local eventBus: any = nil
+local repository: any = nil
+local auditService: any = nil
+local dataService: any = nil
 
-function InventoryService.Init(deps: { eventBus: any, dataService: any, auditService: any })
+local function makeInstanceId(userId: number, itemId: string)
+    return tostring(userId) .. "_" .. tostring(os.time()) .. "_" .. itemId
+end
+
+function InventoryService.Init(deps: { eventBus: any, repository: any, auditService: any, dataService: any })
     eventBus = deps.eventBus
-    dataService = deps.dataService
+    repository = deps.repository
     auditService = deps.auditService
+    data_service = deps.data_service or deps.dataService or deps.dataService
+    dataService = deps.dataService or deps.data_service
+    if repository and dataService then
+        repository.Init({ dataService = dataService })
+    end
 end
 
-function InventoryService.Start()
-    -- TODO: wire event listeners for inventory-related events
-end
+function InventoryService.Start() end
 
-function InventoryService.GetInventory(_userId: number)
-    -- TODO: return cached or loaded inventory from dataService
+function InventoryService.GetInventory(userId: number)
+    local record = repository.Load(userId)
+    if record then return record.Inventory end
     return nil
 end
 
-function InventoryService.AddItem(_userId: number, _itemId: string, _count: number)
-    -- TODO: validation and adding logic; call auditService.Log on mutations
-    return false
+function InventoryService.AddItem(userId: number, itemId: string, count: number)
+    if type(userId) ~= "number" or type(itemId) ~= "string" or type(count) ~= "number" then return false, nil end
+    if count <= 0 then return false, nil end
+    local record = repository.Load(userId)
+    if not record then
+        record = { UserId = userId, Inventory = {}, Equipment = {}, UpdatedAt = os.time() }
+    end
+    -- stacking: try to merge into existing stacks
+    local remaining = count
+    for _, inst in ipairs(record.Inventory) do
+        if inst.ItemId == itemId and inst.StackCount and inst.StackCount < InventoryConfig.DefaultStackLimit then
+            local available = InventoryConfig.DefaultStackLimit - inst.StackCount
+            local toAdd = math.min(available, remaining)
+            inst.StackCount = inst.StackCount + toAdd
+            remaining = remaining - toAdd
+            if remaining <= 0 then break end
+        end
+    end
+    while remaining > 0 do
+        local take = math.min(InventoryConfig.DefaultStackLimit, remaining)
+        local instance = {
+            ItemId = itemId,
+            InstanceId = makeInstanceId(userId, itemId),
+            StackCount = take,
+        }
+        table.insert(record.Inventory, instance)
+        remaining = remaining - take
+    end
+    record.UpdatedAt = os.time()
+    local ok = repository.Save(record)
+    if ok and auditService then
+        auditService.Log("inventory.add", userId, { itemId = itemId, count = count })
+    end
+    if ok and eventBus then
+        eventBus.Publish("Inventory.Updated", { userId = userId })
+    end
+    return ok, nil
 end
 
-function InventoryService.RemoveItem(_userId: number, _instanceId: string, _count: number)
-    -- TODO: validation and removal logic; call auditService.Log on mutations
+function InventoryService.RemoveItem(userId: number, instanceId: string, count: number)
+    if type(userId) ~= "number" or type(instanceId) ~= "string" or type(count) ~= "number" then return false end
+    local record = repository.Load(userId)
+    if not record then return false end
+    for i = #record.Inventory, 1, -1 do
+        local inst = record.Inventory[i]
+        if inst.InstanceId == instanceId then
+            if count >= inst.StackCount then
+                table.remove(record.Inventory, i)
+            else
+                inst.StackCount = inst.StackCount - count
+            end
+            record.UpdatedAt = os.time()
+            local ok = repository.Save(record)
+            if ok and auditService then auditService.Log("inventory.remove", userId, { instanceId = instanceId, count = count }) end
+            if ok and eventBus then eventBus.Publish("Inventory.Updated", { userId = userId }) end
+            return ok
+        end
+    end
     return false
 end
 
